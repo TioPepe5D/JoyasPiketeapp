@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line, Legend, LabelList } from "recharts";
-import {
+// React, Recharts y los íconos (lucide-react) se cargan desde index.html como librerías globales.
+const { useState, useEffect, useLayoutEffect, useCallback, useRef } = React;
+const { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line, Legend, LabelList } = Recharts;
+const {
   Plus,
   Trash2,
   Pencil,
@@ -22,7 +23,7 @@ import {
   Download,
   MessageCircle,
   RefreshCw,
-} from "lucide-react";
+} = LucideReact;
 
 const GERENTE = "Joyas Pikete";
 const VENDEDORES = [
@@ -4241,7 +4242,72 @@ function TabEquipo({ personas, vendedores, pins, comisiones, onGuardarPins, onGu
 
 /* ---------- app ---------- */
 
-export default function App() {
+/* ---------- datos en Firebase ---------- */
+
+// Completa la configuracion guardada con los valores iniciales y aplica las migraciones de categorias.
+// "faltantes" son las claves que hay que (re)guardar porque no existian o cambiaron al migrarlas.
+function prepararConfig(config) {
+  const faltantes = [];
+
+  const fusionPrecios = fusionarYEliminarCategorias(config.precios || PRECIOS_INICIALES);
+  let precios = fusionPrecios.catalogo;
+  if (!config.precios || fusionPrecios.cambio) faltantes.push("precios");
+  if (precios["Anillos Microzircon"] == null) {
+    precios = { ...precios, "Anillos Microzircon": 950 };
+    if (!faltantes.includes("precios")) faltantes.push("precios");
+  }
+
+  const fusionReal = fusionarYEliminarCategorias(config.costosReales || COSTOS_REALES_INICIALES);
+  let costosReales = fusionReal.catalogo;
+  if (!config.costosReales || fusionReal.cambio) faltantes.push("costosReales");
+  if (costosReales["Anillos Microzircon"] == null) {
+    costosReales = { ...costosReales, "Anillos Microzircon": 0 };
+    if (!faltantes.includes("costosReales")) faltantes.push("costosReales");
+  }
+
+  let pins = config.pins;
+  if (!pins) {
+    pins = {};
+    PERSONAS.forEach((nombre) => (pins[nombre] = PIN_INICIAL));
+    faltantes.push("pins");
+  }
+
+  let comisiones = config.comisiones;
+  if (!comisiones) {
+    comisiones = {};
+    VENDEDORES.forEach((nombre) => (comisiones[nombre] = 0));
+    faltantes.push("comisiones");
+  }
+
+  let lotes = config.lotes;
+  if (!lotes) {
+    lotes = [];
+    faltantes.push("lotes");
+  }
+
+  return { precios, costosReales, pins, comisiones, lotes, faltantes };
+}
+
+// Mantiene el valor anterior si no cambio, para no reiniciar formularios abiertos (p. ej. Precios) en cada sincronizacion.
+function mismoValor(prev, next) {
+  return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+}
+
+// Mas recientes primero, en el orden en que se registraron.
+function ordenarPorRegistro(lista) {
+  return [...lista].sort((a, b) => (b.timestamp || "").localeCompare(a.timestamp || ""));
+}
+
+function mensajeErrorDB(e) {
+  const code = e && e.code;
+  if (code === "sin-config") return "Falta configurar Firebase: completa el archivo firebase-config.js con los datos de tu proyecto.";
+  if (code === "permission-denied") {
+    return "Firebase rechazó el acceso. Revisa las reglas de Firestore y que el inicio de sesión anónimo esté activado.";
+  }
+  return "No se pudieron cargar los datos. Revisa tu conexión e intenta de nuevo.";
+}
+
+function App() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [usuario, setUsuario] = useState(null);
@@ -4257,141 +4323,62 @@ export default function App() {
   const [modalResumen, setModalResumen] = useState(null);
   const [modalLote, setModalLote] = useState(null);
   const [toast, setToast] = useState(null);
+  const dbRef = useRef(null);
 
-  // Vuelve a leer las ventas guardadas (para ver lo que registraron los demas).
-  const refrescarVentas = useCallback(async (avisar) => {
-    if (typeof window === "undefined" || !window.storage) return;
-    try {
-      const r = await window.storage.get("ventas", true);
-      const lista = r ? JSON.parse(r.value).map(migrarVenta) : [];
-      setVentas((prev) => (JSON.stringify(prev) === JSON.stringify(lista) ? prev : lista));
-      if (avisar) setToast("Ventas actualizadas.");
-    } catch (e) {
-      if (avisar) setToast("No se pudo actualizar.");
-    }
-  }, []);
-
-  const cargarDatos = useCallback(async () => {
-    setLoading(true);
-    setLoadError(null);
-    try {
-      if (typeof window === "undefined" || !window.storage) {
-        setPrecios(PRECIOS_INICIALES);
-        setCostosReales(COSTOS_REALES_INICIALES);
-        const pinesIniciales = {};
-        PERSONAS.forEach((p) => (pinesIniciales[p] = PIN_INICIAL));
-        setPins(pinesIniciales);
-        const comisionesIniciales = {};
-        VENDEDORES.forEach((v) => (comisionesIniciales[v] = 0));
-        setComisiones(comisionesIniciales);
-        setVentas([]);
-        setLotes([]);
-        setToast("Este entorno no guarda datos de forma permanente.");
-        return;
-      }
-
-      let p;
-      try {
-        const r = await window.storage.get("config:precios", true);
-        p = r ? JSON.parse(r.value) : PRECIOS_INICIALES;
-      } catch {
-        p = PRECIOS_INICIALES;
-        await window.storage.set("config:precios", JSON.stringify(p), true);
-      }
-      const fusionPrecios = fusionarYEliminarCategorias(p);
-      let precioFinal = fusionPrecios.catalogo;
-      let cambioPrecios = fusionPrecios.cambio;
-      if (precioFinal["Anillos Microzircon"] == null) {
-        precioFinal = { ...precioFinal, "Anillos Microzircon": 950 };
-        cambioPrecios = true;
-      }
-      if (cambioPrecios) {
-        await window.storage.set("config:precios", JSON.stringify(precioFinal), true);
-      }
-      setPrecios(precioFinal);
-
-      let cr;
-      try {
-        const r = await window.storage.get("config:costosReales", true);
-        cr = r ? JSON.parse(r.value) : COSTOS_REALES_INICIALES;
-      } catch {
-        cr = COSTOS_REALES_INICIALES;
-        await window.storage.set("config:costosReales", JSON.stringify(cr), true);
-      }
-      const fusionReal = fusionarYEliminarCategorias(cr);
-      let realFinal = fusionReal.catalogo;
-      let cambioReal = fusionReal.cambio;
-      if (realFinal["Anillos Microzircon"] == null) {
-        realFinal = { ...realFinal, "Anillos Microzircon": 0 };
-        cambioReal = true;
-      }
-      if (cambioReal) {
-        await window.storage.set("config:costosReales", JSON.stringify(realFinal), true);
-      }
-      setCostosReales(realFinal);
-
-      let pn = null;
-      try {
-        const r = await window.storage.get("config:pins", true);
-        pn = r ? JSON.parse(r.value) : null;
-      } catch {
-        pn = null;
-      }
-      if (!pn) {
-        pn = {};
-        PERSONAS.forEach((nombre) => (pn[nombre] = PIN_INICIAL));
-        await window.storage.set("config:pins", JSON.stringify(pn), true);
-      }
-      setPins(pn);
-
-      let co = null;
-      try {
-        const r = await window.storage.get("config:comisiones", true);
-        co = r ? JSON.parse(r.value) : null;
-      } catch {
-        co = null;
-      }
-      if (!co) {
-        co = {};
-        VENDEDORES.forEach((nombre) => (co[nombre] = 0));
-        await window.storage.set("config:comisiones", JSON.stringify(co), true);
-      }
-      setComisiones(co);
-
-      let v;
-      try {
-        const r = await window.storage.get("ventas", true);
-        v = r ? JSON.parse(r.value) : [];
-      } catch {
-        v = [];
-        await window.storage.set("ventas", JSON.stringify(v), true);
-      }
-      const migradas = v.map(migrarVenta);
-      const cambio = migradas.some((m, i) => m !== v[i]);
-      if (cambio) {
-        await window.storage.set("ventas", JSON.stringify(migradas), true);
-      }
-      setVentas(migradas);
-
-      let lt;
-      try {
-        const r = await window.storage.get("lotes", true);
-        lt = r ? JSON.parse(r.value) : [];
-      } catch {
-        lt = [];
-        await window.storage.set("lotes", JSON.stringify(lt), true);
-      }
-      setLotes(lt);
-    } catch (e) {
-      setLoadError("No se pudieron cargar los datos. Intenta de nuevo.");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
+  // Los datos viven en Firebase (Firestore) y se escuchan en tiempo real: cada uno ve al instante
+  // lo que registran los demas. Ver window.__dbListo en index.html.
   useEffect(() => {
-    cargarDatos();
-  }, [cargarDatos]);
+    let cancelado = false;
+    const desuscribir = [];
+    let configLista = false;
+    let ventasListas = false;
+    const terminarCarga = () => {
+      if (configLista && ventasListas) setLoading(false);
+    };
+    const alFallar = (e) => {
+      if (cancelado) return;
+      setLoadError(mensajeErrorDB(e));
+      setLoading(false);
+    };
+
+    window.__dbListo
+      .then((db) => {
+        if (cancelado) return;
+        dbRef.current = db;
+        desuscribir.push(
+          db.escucharConfig((config, desdeCache) => {
+            const c = prepararConfig(config);
+            setPrecios((prev) => mismoValor(prev, c.precios));
+            setCostosReales((prev) => mismoValor(prev, c.costosReales));
+            setPins((prev) => mismoValor(prev, c.pins));
+            setComisiones((prev) => mismoValor(prev, c.comisiones));
+            setLotes((prev) => mismoValor(prev, c.lotes));
+            // Solo se completan los valores iniciales con datos del servidor: la copia local puede estar incompleta.
+            if (!desdeCache) c.faltantes.forEach((clave) => db.guardarConfig(clave, c[clave]).catch(() => {}));
+            configLista = true;
+            terminarCarga();
+          }, alFallar)
+        );
+        desuscribir.push(
+          db.escucharVentas((lista) => {
+            setVentas((prev) => mismoValor(prev, ordenarPorRegistro(lista.map(migrarVenta))));
+            ventasListas = true;
+            terminarCarga();
+          }, alFallar)
+        );
+      })
+      .catch(alFallar);
+
+    return () => {
+      cancelado = true;
+      desuscribir.forEach((fn) => fn());
+    };
+  }, []);
+
+  // Las ventas se actualizan solas; el boton de actualizar solo lo confirma.
+  function refrescarVentas(avisar) {
+    if (avisar) setToast("Ventas al día.");
+  }
 
   useEffect(() => {
     if (!toast) return;
@@ -4403,19 +4390,6 @@ export default function App() {
     if (typeof window !== "undefined" && window.scrollTo) window.scrollTo(0, 0);
   }, [vista]);
 
-  // Al entrar a Historial / Reportes / Gráficos y al volver a la app, se leen las ventas mas recientes.
-  useEffect(() => {
-    if (usuario && ["historial", "reportes", "graficos"].includes(vista)) refrescarVentas(false);
-  }, [vista, usuario, refrescarVentas]);
-  useEffect(() => {
-    if (typeof document === "undefined") return undefined;
-    const alVolver = () => {
-      if (document.visibilityState === "visible") refrescarVentas(false);
-    };
-    document.addEventListener("visibilitychange", alVolver);
-    return () => document.removeEventListener("visibilitychange", alVolver);
-  }, [refrescarVentas]);
-
   useEffect(() => {
     if (usuario) {
       setVista("venta");
@@ -4426,102 +4400,66 @@ export default function App() {
   const esGerente = usuario === GERENTE;
   const temaRosado = usuario === "Joyas BrilliantBlue";
 
-  async function guardarSilencioso(key, valor, setter) {
+  // Los cambios se ven al instante. Sin internet quedan pendientes y Firebase los sube al volver la conexion;
+  // solo se avisa si Firebase los rechaza.
+  function avisarSiFalla(promesa) {
+    promesa.catch(() => setToast("No se pudo guardar el cambio."));
+  }
+  function guardarConfig(clave, valor, setter) {
     setter(valor);
-    if (typeof window === "undefined" || !window.storage) return;
-    try {
-      await window.storage.set(key, JSON.stringify(valor), true);
-    } catch (e) {
-      setToast("No se pudo guardar el cambio.");
-    }
+    avisarSiFalla(dbRef.current.guardarConfig(clave, valor));
   }
 
-  // Cada cambio se aplica sobre la lista MAS RECIENTE guardada (no sobre la que se cargo al entrar),
-  // para no borrar las ventas que otros vendedores hayan registrado mientras tanto.
-  async function mutarVentas(fn, mensaje) {
-    let lista = ventas;
-    if (typeof window !== "undefined" && window.storage) {
-      try {
-        const r = await window.storage.get("ventas", true);
-        lista = r ? JSON.parse(r.value).map(migrarVenta) : [];
-      } catch (e) {
-        lista = ventas;
-      }
-    }
-    const next = fn(lista);
-    setVentas(next);
-    if (typeof window !== "undefined" && window.storage) {
-      try {
-        await window.storage.set("ventas", JSON.stringify(next), true);
-      } catch (e) {
-        setToast("No se pudo guardar el cambio.");
-        return;
-      }
-    }
-    if (mensaje) setToast(mensaje);
-  }
   function agregarVenta(venta) {
-    mutarVentas((lista) => [venta, ...lista.filter((v) => v.id !== venta.id)], "Venta guardada.");
+    avisarSiFalla(dbRef.current.guardarVenta(venta));
+    setToast("Venta guardada.");
   }
   function actualizarVenta(venta) {
-    mutarVentas(
-      (lista) => (lista.some((v) => v.id === venta.id) ? lista.map((v) => (v.id === venta.id ? venta : v)) : [venta, ...lista]),
-      "Venta actualizada."
-    );
+    avisarSiFalla(dbRef.current.guardarVenta(venta));
+    setToast("Venta actualizada.");
   }
   function eliminarVenta(id) {
-    mutarVentas((lista) => lista.filter((v) => v.id !== id), "Venta eliminada.");
+    avisarSiFalla(dbRef.current.eliminarVenta(id));
+    setToast("Venta eliminada.");
   }
   function confirmarTickets(ids) {
     const fecha = new Date().toISOString();
-    mutarVentas(
-      (lista) =>
-        lista.map((v) =>
-          ids.includes(v.id) ? { ...v, ticketCosto: { fecha, por: usuario, monto: Math.round(v.costoTotal || 0) } } : v
-        ),
-      ids.length === 1 ? "Transferencia confirmada: ticket puesto." : `Transferencia confirmada en ${ids.length} ventas.`
-    );
+    const tickets = ventas
+      .filter((v) => ids.includes(v.id))
+      .map((v) => ({ id: v.id, ticketCosto: { fecha, por: usuario, monto: Math.round(v.costoTotal || 0) } }));
+    avisarSiFalla(dbRef.current.ponerTickets(tickets));
+    setToast(ids.length === 1 ? "Transferencia confirmada: ticket puesto." : `Transferencia confirmada en ${ids.length} ventas.`);
   }
   function quitarTicket(id) {
-    mutarVentas(
-      (lista) =>
-        lista.map((v) => {
-          if (v.id !== id) return v;
-          const { ticketCosto, ...resto } = v;
-          return resto;
-        }),
-      "Ticket quitado."
-    );
+    avisarSiFalla(dbRef.current.quitarTicket(id));
+    setToast("Ticket quitado.");
   }
   function agregarLote(lote) {
-    const next = [lote, ...lotes];
-    guardarSilencioso("lotes", next, setLotes);
+    guardarConfig("lotes", [lote, ...lotes], setLotes);
     setToast("Lote guardado.");
   }
   function actualizarLote(lote) {
-    const next = lotes.map((l) => (l.id === lote.id ? lote : l));
-    guardarSilencioso("lotes", next, setLotes);
+    guardarConfig("lotes", lotes.map((l) => (l.id === lote.id ? lote : l)), setLotes);
     setToast("Lote actualizado.");
   }
   function eliminarLote(id) {
-    const next = lotes.filter((l) => l.id !== id);
-    guardarSilencioso("lotes", next, setLotes);
+    guardarConfig("lotes", lotes.filter((l) => l.id !== id), setLotes);
     setToast("Lote eliminado.");
   }
-  async function guardarPrecios(nuevos) {
-    await guardarSilencioso("config:precios", nuevos, setPrecios);
+  function guardarPrecios(nuevos) {
+    guardarConfig("precios", nuevos, setPrecios);
     setToast("Precios actualizados.");
   }
-  async function guardarCostosReales(nuevos) {
-    await guardarSilencioso("config:costosReales", nuevos, setCostosReales);
+  function guardarCostosReales(nuevos) {
+    guardarConfig("costosReales", nuevos, setCostosReales);
     setToast("Costos reales actualizados.");
   }
-  async function guardarPins(nuevos) {
-    await guardarSilencioso("config:pins", nuevos, setPins);
+  function guardarPins(nuevos) {
+    guardarConfig("pins", nuevos, setPins);
     setToast("PIN actualizados.");
   }
-  async function guardarComisiones(nuevos) {
-    await guardarSilencioso("config:comisiones", nuevos, setComisiones);
+  function guardarComisiones(nuevos) {
+    guardarConfig("comisiones", nuevos, setComisiones);
     setToast("Comisiones actualizadas.");
   }
 
@@ -4560,7 +4498,7 @@ export default function App() {
 
       {loading && <LoadingScreen />}
 
-      {!loading && loadError && <ErrorScreen msg={loadError} onRetry={cargarDatos} />}
+      {!loading && loadError && <ErrorScreen msg={loadError} onRetry={() => window.location.reload()} />}
 
       {!loading && !loadError && !usuario && <LoginScreen personas={PERSONAS} pins={pins} onLogin={setUsuario} />}
 
@@ -4722,3 +4660,5 @@ export default function App() {
     </div>
   );
 }
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);

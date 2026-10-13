@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0B0B0D" />
+<meta name="description" content="Contabilidad y registro de ventas de Joyas Pikete" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Joyas Pikete" />
+<meta name="mobile-web-app-capable" content="yes" />
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="icon" type="image/svg+xml" href="icon.svg" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<title>Joyas Pikete · Contabilidad</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<style>
+  html, body { margin: 0; padding: 0; background: #0B0B0D; color: #F5F3EE; }
+  body { min-height: 100vh; -webkit-font-smoothing: antialiased; }
+  .arranque { min-height: 100vh; display: flex; align-items: center; justify-content: center; color: #9C9AA5; font: 15px -apple-system, BlinkMacSystemFont, sans-serif; }
+</style>
+</head>
+<body>
+<div id="root"><div class="arranque">Cargando...</div></div>
+
+<script>
+// Si algo falla al cargar, se muestra arriba de la pantalla (util para revisar desde el celular).
+window.addEventListener('error', function (e) {
+  var d = document.createElement('div');
+  d.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#E0645A;color:#000;z-index:99999;font:11px/1.4 monospace;padding:8px;white-space:pre-wrap;max-height:50vh;overflow:auto';
+  d.textContent = 'ERROR: ' + e.message + '\n@ ' + (e.filename || '') + ':' + (e.lineno || '') + ':' + (e.colno || '');
+  document.body && document.body.appendChild(d);
+});
+
+// La app (app.jsx) espera esta promesa para leer y guardar los datos en Firebase.
+window.__dbListo = new Promise(function (ok, fallo) { window.__dbOk = ok; window.__dbFallo = fallo; });
+// Si el SDK de Firebase no logra cargar (por ejemplo, sin internet la primera vez), no se queda cargando para siempre.
+setTimeout(function () {
+  window.__dbFallo(Object.assign(new Error('Firebase no respondió'), { code: 'sin-conexion' }));
+}, 20000);
+</script>
+
+<script src="firebase-config.js"></script>
+
+<!-- Firebase: colección "config" (precios, costos reales, PIN, comisiones, lotes) y colección "ventas" (una venta por documento) -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, doc, setDoc,
+         updateDoc, deleteDoc, deleteField, writeBatch, onSnapshot } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+const cfg = window.FIREBASE_CONFIG;
+if (!cfg || !cfg.apiKey || !cfg.projectId) {
+  window.__dbFallo(Object.assign(new Error('Falta firebase-config.js'), { code: 'sin-config' }));
+} else {
+  try {
+    const app = initializeApp(cfg);
+
+    // El ingreso con PIN es propio de la app; la sesión anónima solo sirve para que las reglas de Firestore
+    // acepten únicamente a quien abre la app. Si no está activada en Firebase, se sigue sin ella.
+    const auth = getAuth(app);
+    try {
+      await auth.authStateReady();
+      if (!auth.currentUser) await signInAnonymously(auth);
+    } catch (e) {
+      console.warn('Sin sesión anónima de Firebase:', e && e.code);
+    }
+
+    // Copia local en el teléfono: la app abre sin internet y los cambios se suben al volver la conexión.
+    const db = initializeFirestore(app, {
+      localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+    });
+    const limpio = (v) => JSON.parse(JSON.stringify(v));
+    const refVenta = (id) => doc(db, 'ventas', id);
+
+    window.__dbOk({
+      // cb(config, desdeCache) con config = { precios, costosReales, pins, comisiones, lotes } (solo las que existan)
+      escucharConfig(cb, alFallar) {
+        return onSnapshot(collection(db, 'config'), { includeMetadataChanges: true }, (snap) => {
+          const config = {};
+          snap.forEach((d) => {
+            try { config[d.id] = JSON.parse(d.data().json); } catch (e) { console.warn('config inválida:', d.id); }
+          });
+          cb(config, snap.metadata.fromCache);
+        }, alFallar);
+      },
+      escucharVentas(cb, alFallar) {
+        return onSnapshot(collection(db, 'ventas'), (snap) => cb(snap.docs.map((d) => d.data())), alFallar);
+      },
+      guardarConfig: (clave, valor) =>
+        setDoc(doc(db, 'config', clave), { json: JSON.stringify(valor), actualizado: new Date().toISOString() }),
+      guardarVenta: (venta) => setDoc(refVenta(venta.id), limpio(venta)),
+      eliminarVenta: (id) => deleteDoc(refVenta(id)),
+      ponerTickets: (tickets) => {
+        const lote = writeBatch(db);
+        tickets.forEach((t) => lote.update(refVenta(t.id), { ticketCosto: t.ticketCosto }));
+        return lote.commit();
+      },
+      quitarTicket: (id) => updateDoc(refVenta(id), { ticketCosto: deleteField() }),
+    });
+  } catch (e) {
+    window.__dbFallo(e);
+  }
+}
+</script>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js" crossorigin="anonymous"></script>
+<script>window.react = window.React; // lucide-react (UMD) busca React con este nombre</script>
+<script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/lucide-react@0.453.0/dist/umd/lucide-react.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+
+<script type="text/babel" data-presets="react" src="app.jsx"></script>
+
+<script>
+if ('serviceWorker' in navigator) {
+  var recargado = false;
+  navigator.serviceWorker.addEventListener('message', function (e) {
+    if (e.data && e.data.type === 'SW_UPDATED' && !recargado) {
+      recargado = true;
+      window.location.reload();
+    }
+  });
+  window.addEventListener('load', function () {
+    navigator.serviceWorker.register('sw.js').then(function (reg) {
+      reg.update();
+      setInterval(function () { reg.update().catch(function () {}); }, 60000);
+    }).catch(function () {});
+  });
+}
+</script>
+</body>
+</html>
